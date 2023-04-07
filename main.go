@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"net/url"
@@ -21,11 +22,15 @@ type urlInfo struct {
 }
 
 func standardizeURL(urlObj *url.URL) string {
-	return fmt.Sprintf("https://%s%s", urlObj.Hostname(), urlObj.Path)
+	// Remove trailing / from end of path, otherwise foo.com and foo.com/
+	// will be unnecessarily treated as different URLs
+	trimmedPath := strings.TrimSuffix(urlObj.Path, "/")
+	return fmt.Sprintf("https://%s%s", urlObj.Hostname(), trimmedPath)
 }
 
 func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 	defer wg.Done()
+	log.Println("Fetching", targetURL)
 	resp, err := http.Get(targetURL)
 	if err != nil {
 		log.Println("Error while fetching URL", targetURL, err)
@@ -51,7 +56,7 @@ func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 			for _, a := range n.Attr {
 				if a.Key == "href" {
 					// Parse url so we can standardize it
-					urlObj, err := url.Parse(a.Val)
+					urlObj, err := url.Parse(strings.TrimSpace(a.Val))
 					if err != nil {
 						log.Println("Error parsing url", a.Val, err)
 					} else if urlObj.Scheme == "https" {
@@ -91,6 +96,9 @@ func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 
 func aggregateURLs(baseURL string, maxDepth int) {
 	log.Println("Max depth set to", maxDepth)
+	if maxDepth == 0 {
+		log.Println("No max depth specified -- program may not terminate or it may terminate due to lack of resources!")
+	}
 
 	// Standardize baseURL, assume https scheme
 	urlObj, err := url.Parse(baseURL)
@@ -100,8 +108,7 @@ func aggregateURLs(baseURL string, maxDepth int) {
 	standardizedURL := standardizeURL(urlObj)
 
 	crawled := map[string]bool{standardizedURL: true}
-	// Buffered channel to minimize blocking
-	urlAggregation := make(chan urlInfo, 100)
+	urlAggregation := make(chan urlInfo)
 	var wg sync.WaitGroup
 
 	wg.Add(1)
@@ -119,7 +126,7 @@ func aggregateURLs(baseURL string, maxDepth int) {
 	}()
 
 	for url := range urlAggregation {
-		if !crawled[url.val] && url.depth < maxDepth {
+		if !crawled[url.val] && (url.depth < maxDepth || maxDepth == 0) {
 			wg.Add(1)
 			crawled[url.val] = true
 			go crawl(url.val, url.depth, urlAggregation, &wg)
@@ -129,7 +136,7 @@ func aggregateURLs(baseURL string, maxDepth int) {
 
 func main() {
 	url := flag.String("url", "", "REQUIRED URL to begin parsing")
-	depth := flag.Int("depth", 2, "Max depth for crawling. Set to 0 for no max depth")
+	depth := flag.Int("depth", 2, "Max depth for crawling. Set to 0 for no max depth. Anything beyond depth 3 may get crazy!")
 	flag.Parse()
 	if *url == "" {
 		flag.Usage()
