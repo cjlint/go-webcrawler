@@ -24,24 +24,11 @@ type urlInfo struct {
 func standardizeURL(urlObj *url.URL) string {
 	// Remove trailing / from end of path, otherwise foo.com and foo.com/
 	// will be unnecessarily treated as different URLs
-	trimmedPath := strings.TrimSuffix(urlObj.Path, "/")
+	trimmedPath := strings.TrimRight(urlObj.Path, "/")
 	return fmt.Sprintf("https://%s%s", urlObj.Hostname(), trimmedPath)
 }
 
-func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
-	defer wg.Done()
-	log.Println("Fetching", targetURL)
-	resp, err := http.Get(targetURL)
-	if err != nil {
-		log.Println("Error while fetching URL", targetURL, err)
-		return
-	}
-	doc, err := html.Parse(resp.Body)
-	if err != nil {
-		log.Println("Failed to parse body from URL", targetURL, err)
-		return
-	}
-
+func parseURLs(doc *html.Node) []string {
 	// Many URLs will be the same after sanitizing, keep a local map
 	// of seen URLs to reduce duplicates in logs
 	seenURLs := map[string]bool{}
@@ -67,7 +54,6 @@ func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 						standardizedURL := standardizeURL(urlObj)
 						if !seenURLs[standardizedURL] {
 							urls = append(urls, standardizedURL)
-							ch <- urlInfo{standardizedURL, depth + 1}
 						}
 						seenURLs[standardizedURL] = true
 					}
@@ -83,6 +69,29 @@ func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 		}
 	}
 	f(doc)
+
+	return urls
+}
+
+func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
+	defer wg.Done()
+	log.Println("Fetching", targetURL)
+	resp, err := http.Get(targetURL)
+	if err != nil {
+		log.Println("Error while fetching URL", targetURL, err)
+		return
+	}
+	doc, err := html.Parse(resp.Body)
+	if err != nil {
+		log.Println("Failed to parse body from URL", targetURL, err)
+		return
+	}
+
+	urls := parseURLs(doc)
+
+	for _, u := range urls {
+		ch <- urlInfo{u, depth + 1}
+	}
 
 	// Use lock to make sure that different goroutines don't mix logs,
 	// which could cause confusing and incorrect log output
@@ -136,7 +145,7 @@ func aggregateURLs(baseURL string, maxDepth int) {
 
 func main() {
 	url := flag.String("url", "", "REQUIRED URL to begin parsing")
-	depth := flag.Int("depth", 2, "Max depth for crawling. Set to 0 for no max depth. Anything beyond depth 3 may get crazy!")
+	depth := flag.Int("depth", 3, "Max depth for crawling. Set to 0 for no max depth. Anything beyond depth 3 may produce a lot of output!")
 	flag.Parse()
 	if *url == "" {
 		flag.Usage()
