@@ -5,9 +5,6 @@ To simplify things, it only follows absolute https URLs
 found in the href attribute of `<a>` tags.
 Crawls up to a specified depth (defaults to 3) or crawls
 indefinitely if the user sets `-depth 0`.
-I did not implement a limit to the amount of concurrency in the program,
-so crawling indefinitely could end with the program running out of
-resources.
 
 ## How to Run
 
