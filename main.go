@@ -20,6 +20,10 @@ type urlInfo struct {
 	depth int
 }
 
+func standardizeURL(urlObj *url.URL) string {
+	return fmt.Sprintf("https://%s%s", urlObj.Hostname(), urlObj.Path)
+}
+
 func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 	defer wg.Done()
 	resp, err := http.Get(targetURL)
@@ -55,7 +59,7 @@ func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 						// Standardize URL to prevent crawling the same URL multiple times
 						// for example, ignore query parameters and standardize path +
 						// trailing slash
-						standardizedURL := fmt.Sprintf("https://%s%s", urlObj.Hostname(), urlObj.Path)
+						standardizedURL := standardizeURL(urlObj)
 						if !seenURLs[standardizedURL] {
 							urls = append(urls, standardizedURL)
 							ch <- urlInfo{standardizedURL, depth + 1}
@@ -66,6 +70,9 @@ func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
 				}
 			}
 		}
+		// Read html recursively. Iteratively would be better in case of
+		// large html files that use excess memory, but this solution
+		// works for now :)
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			f(c)
 		}
@@ -90,16 +97,17 @@ func aggregateURLs(baseURL string, maxDepth int) {
 	if err != nil {
 		log.Fatal("Error parsing base URL", baseURL, err)
 	}
-	standardizedURL := fmt.Sprintf("https://%s%s", urlObj.Hostname(), urlObj.Path)
+	standardizedURL := standardizeURL(urlObj)
 
 	crawled := map[string]bool{standardizedURL: true}
-	urlAggregation := make(chan urlInfo)
+	// Buffered channel to minimize blocking
+	urlAggregation := make(chan urlInfo, 100)
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go crawl(standardizedURL, 0, urlAggregation, &wg)
 
-	// Use wg to detect when there are no more running parse operations,
+	// Use wg to detect when there are no more running crawl operations,
 	// then close the url aggregation channel to stop the process
 	//
 	// This urlAggregation channel method is iterative instead of
