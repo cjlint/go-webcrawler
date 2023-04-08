@@ -1,6 +1,6 @@
 # go-webcrawler
-Web crawler written in Go as an example project. Parallelizes HTTP calls
-with goroutines.
+Web crawler written in Go as an example project.
+Parallelizes HTTP calls with a configurable goroutine worker pool.
 To simplify things, it only follows absolute https URLs
 found in the href attribute of `<a>` tags.
 Crawls up to a specified depth (defaults to 3) or crawls
@@ -48,9 +48,7 @@ go test
 ```
 
 Integration tests were not included due to time constraints, but they could be written
-with the [httptest](https://pkg.go.dev/net/http/httptest) package. The source code
-may need to be modified so that there is testable output from the program other
-than asynchronous logs.
+with the [httptest](https://pkg.go.dev/net/http/httptest) package.
 
 ## Examples Used
 - https://pkg.go.dev/golang.org/x/net/html#example-Parse for HTML parsing code
