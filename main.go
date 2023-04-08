@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -14,7 +15,11 @@ import (
 	"golang.org/x/net/html"
 )
 
-var logMutex sync.Mutex
+type urlResults struct {
+	baseURL   string
+	childURLs []string
+	depth     int
+}
 
 type urlInfo struct {
 	val   string
@@ -73,42 +78,71 @@ func parseURLs(doc *html.Node) []string {
 	return urls
 }
 
-func crawl(targetURL string, depth int, ch chan urlInfo, wg *sync.WaitGroup) {
-	defer wg.Done()
-	log.Println("Fetching", targetURL)
-	resp, err := http.Get(targetURL)
-	if err != nil {
-		log.Println("Error while fetching URL", targetURL, err)
-		return
-	}
-	doc, err := html.Parse(resp.Body)
-	if err != nil {
-		log.Println("Failed to parse body from URL", targetURL, err)
-		return
-	}
+func crawlWorker(client *http.Client, urlsToCrawl chan urlInfo, results chan urlResults) {
+	for url := range urlsToCrawl {
+		resp, err := client.Get(url.val)
+		if err != nil {
+			log.Println("Error while fetching URL", url, err)
+			return
+		}
+		doc, err := html.Parse(resp.Body)
+		if err != nil {
+			log.Println("Failed to parse body from URL", url, err)
+			return
+		}
 
-	urls := parseURLs(doc)
+		childURLs := parseURLs(doc)
 
-	for _, u := range urls {
-		ch <- urlInfo{u, depth + 1}
-	}
-
-	// Use lock to make sure that different goroutines don't mix logs,
-	// which could cause confusing and incorrect log output
-	logMutex.Lock()
-	defer logMutex.Unlock()
-	log.Printf("%s (depth %d)\n", targetURL, depth)
-	for _, childURL := range urls {
-		log.Printf("    %s\n", childURL)
+		results <- urlResults{url.val, childURLs, url.depth}
 	}
 }
 
-func aggregateURLs(baseURL string, maxDepth int) {
+func processResults(wg *sync.WaitGroup, urlsToCrawl chan urlInfo, results chan urlResults, maxDepth int) {
+	// Background function that prints logs in synchronous order,
+	// then sends child urls to next channel to be processed
+	//
+	// The waitgroup watches urlsToCrawl -- once it is empty the program can end.
+	crawled := map[string]bool{}
+	for info := range results {
+		crawled[info.baseURL] = true
+		log.Printf("%s (depth %d)\n", info.baseURL, info.depth)
+		for _, childURL := range info.childURLs {
+			log.Printf("    %s\n", childURL)
+		}
+		for _, childURL := range info.childURLs {
+			if !crawled[childURL] && (info.depth < maxDepth || maxDepth == 0) {
+				// select statement ensures that this operation never blocks,
+				// even if it means we have to start throwing away URLs
+				// that don't fit in the buffer
+				select {
+				case urlsToCrawl <- urlInfo{childURL, info.depth + 1}:
+					wg.Add(1)
+				default:
+					log.Println("URL buffer is full, discarding URL", childURL)
+				}
+			}
+		}
+		wg.Done()
+	}
+	close(urlsToCrawl)
+}
+
+func recommendedWorkers(maxDepth int) int {
+	if maxDepth == 0 {
+		return 1000
+	}
+	return int(math.Min(math.Pow10(maxDepth-1), 1000))
+}
+
+func crawl(baseURL string, maxDepth, maxWorkers int) {
 	log.Println("Max depth set to", maxDepth)
 	if maxDepth == 0 {
-		log.Println("No max depth specified -- program may not terminate or it may terminate due to lack of resources!")
+		log.Println("No max depth specified -- program may not terminate")
 	}
-
+	if maxWorkers == 0 {
+		maxWorkers = recommendedWorkers(maxDepth)
+	}
+	log.Println("Number of workers set to", maxWorkers)
 	// Standardize baseURL, assume https scheme
 	urlObj, err := url.Parse(baseURL)
 	if err != nil {
@@ -116,40 +150,48 @@ func aggregateURLs(baseURL string, maxDepth int) {
 	}
 	standardizedURL := standardizeURL(urlObj)
 
-	crawled := map[string]bool{standardizedURL: true}
-	urlAggregation := make(chan urlInfo)
+	// buffered channel prevents deadlocking, because the results
+	// process and crawling process feed into each other
+	urlsToCrawl := make(chan urlInfo, 1000*maxWorkers)
+	results := make(chan urlResults)
 	var wg sync.WaitGroup
-
+	// Make sure we wait for the base URL crawl to finish
 	wg.Add(1)
-	go crawl(standardizedURL, 0, urlAggregation, &wg)
-
-	// Use wg to detect when there are no more running crawl operations,
-	// then close the url aggregation channel to stop the process
-	//
-	// This urlAggregation channel method is iterative instead of
-	// recursive, allowing the program to run longer without
-	// worrying about memory issues
+	// First initialize channel with base URL
 	go func() {
-		wg.Wait()
-		close(urlAggregation)
+		urlsToCrawl <- urlInfo{standardizedURL, 1}
 	}()
 
-	for url := range urlAggregation {
-		if !crawled[url.val] && (url.depth < maxDepth || maxDepth == 0) {
-			wg.Add(1)
-			crawled[url.val] = true
-			go crawl(url.val, url.depth, urlAggregation, &wg)
-		}
+	go processResults(&wg, urlsToCrawl, results, maxDepth)
+
+	// Create custom http client that disables keepalives
+	// to conserve resources
+	tr := &http.Transport{
+		DisableKeepAlives: true,
 	}
+	client := &http.Client{Transport: tr}
+
+	// Spawn the appropriate number of crawl workers
+	for i := 0; i < maxWorkers; i++ {
+		go crawlWorker(client, urlsToCrawl, results)
+	}
+
+	// In the main thread, use wg to detect when there are no more
+	// urls to crawl, then close the channel to stop the workers
+	wg.Wait()
+	log.Println("No more URLs to crawl, ending program")
+	close(results)
+
 }
 
 func main() {
 	url := flag.String("url", "", "REQUIRED URL to begin parsing")
-	depth := flag.Int("depth", 3, "Max depth for crawling. Set to 0 for no max depth. Anything beyond depth 3 may produce a lot of output!")
+	depth := flag.Int("depth", 3, "Max depth for crawling. Set to 0 for no max depth")
+	workers := flag.Int("workers", 0, "Max number of workers in the pool for crawling. A reasonable default will be chosen based on depth setting")
 	flag.Parse()
 	if *url == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
-	aggregateURLs(*url, *depth)
+	crawl(*url, *depth, *workers)
 }

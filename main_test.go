@@ -3,7 +3,9 @@ package main
 import (
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -72,6 +74,83 @@ func TestParseURLs(t *testing.T) {
 			}
 			if !equal {
 				t.Errorf("parseURLs() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestProcessResults(t *testing.T) {
+	tests := []struct {
+		name           string
+		resultsInput   []urlResults
+		expectedOutput []urlInfo
+	}{
+		{"test basic", []urlResults{
+			{"https://foo.com", []string{"https://a.com", "https://b.com"}, 1},
+			{"https://a.com", []string{"https://c.com", "https://d.com"}, 2},
+		}, []urlInfo{
+			{"https://a.com", 2},
+			{"https://b.com", 2},
+			{"https://c.com", 3},
+			{"https://d.com", 3},
+		}},
+		{"test ignores already crawled", []urlResults{
+			{"https://foo.com", []string{"https://a.com", "https://foo.com"}, 1},
+			{"https://a.com", []string{"https://a.com", "https://b.com"}, 2},
+		}, []urlInfo{
+			{"https://a.com", 2},
+			{"https://b.com", 3},
+		}},
+		{"test overflow is ignored", []urlResults{
+			{"https://foo.com", []string{
+				"https://a.com",
+				"https://b.com",
+				"https://c.com",
+				"https://d.com",
+				"https://e.com",
+				"https://f.com",
+				"https://g.com",
+			}, 1},
+		}, []urlInfo{
+			{"https://a.com", 2},
+			{"https://b.com", 2},
+			{"https://c.com", 2},
+			{"https://d.com", 2},
+			{"https://e.com", 2},
+		}},
+		{"test max depth is ignored", []urlResults{
+			{"https://foo.com", []string{"https://a.com", "https://b.com"}, 3},
+		}, []urlInfo{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var wg sync.WaitGroup
+			urlsToCrawl := make(chan urlInfo, 5)
+			results := make(chan urlResults)
+			wg.Add(1)
+			go processResults(&wg, urlsToCrawl, results, 3)
+
+			for _, result := range tt.resultsInput {
+				results <- result
+			}
+			close(results)
+
+			time.Sleep(100 * time.Millisecond)
+			for i, expectedURL := range tt.expectedOutput {
+				url, ok := <-urlsToCrawl
+				if url != expectedURL {
+					t.Errorf("urlsToCrawl item %d = %v, expected %v", i, url, expectedURL)
+				}
+				if !ok {
+					t.Errorf("Not enough items in urlsToCrawl")
+				}
+			}
+			if len(urlsToCrawl) != 0 {
+				remainingURLs := []urlInfo{}
+				for i := 0; i < len(urlsToCrawl); i++ {
+					remainingURLs = append(remainingURLs, <-urlsToCrawl)
+				}
+				t.Errorf("Too many urls left in urlsToCrawl %v", remainingURLs)
 			}
 		})
 	}
